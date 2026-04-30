@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  truthlens:
+    build: .
+    container_name: truthlens_ai
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./output:/app/output
+    environment:
+      - DEBUG=False
+      - APP_NAME=TruthLens AI Production
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10mb"
+        max-file: "3"

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.git
+.gitignore
+app.log
+venv/
+.antigravity/
+data/
+WELFake_Dataset.csv
+*.pth
+*.pkl
+# Note: In a real production, you might COPY models from a volume or a specific bucket
+# but for this local project, we might want to include them in the image if they aren't too large.
+# If they are large, don't ignore them here if you want them in the image.

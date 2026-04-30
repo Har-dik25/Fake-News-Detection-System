@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+app.log
+output/*.pth
+output/*.pkl
+output/*.h5
+*.csv
+data/*.csv
+.env
+.antigravity/

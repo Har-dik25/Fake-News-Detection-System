@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+gunicorn
+torch
+transformers
+nltk
+numpy
+pandas
+scikit-learn
+pydantic
+pydantic-settings
+python-dotenv
+python-multipart
