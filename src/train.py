@@ -1,145 +1,224 @@
+"""
+src/train.py — DL Objective (CSR311)
+BiLSTM with self-attention for fake news classification (PyTorch)
+
+Requirements fulfilled:
+  1. WELFake Dataset (available on Kaggle)
+  2. Preprocess: lowercase, remove HTML, tokenize with NLTK, pad to 200 tokens
+  3. BiLSTM (hidden=256, 2 layers) + scaled dot-product self-attention
+  4. Binary classification (real/fake), dropout=0.3, BCELoss + Adam
+  5. Plot attention heatmaps over article tokens
+  6. Report: Accuracy, AUC-ROC. Compare BiLSTM+attention vs BiLSTM (no attention)
+"""
+
+import os
+import sys
+import pickle
 import numpy as np
 import pandas as pd
-import re, string, os, pickle
-import nltk
-
+import torch
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.linear_model import LogisticRegression
-from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
 
-from utils import preprocess_text, extract_features
+# Add parent directory to path so we can run this file directly
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import tensorflow as tf
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.layers import *
-from tensorflow.keras.models import Model
+from src.data_loader import NewsDataset, prepare_sequences
+from src.bilstm_attention import BiLSTMWithAttention, train_model, evaluate_model
+from src.visualize_attention import get_attention_and_plot
 
 # =====================
-# NLTK SETUP
+# CONFIGURATION
 # =====================
-nltk.download('stopwords')
-nltk.download('wordnet')
-nltk.download('vader_lexicon')
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_PATH = os.path.join(BASE_DIR, "WELFake_Dataset.csv")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+SUBSET_SIZE = 5000       # Use a meaningful subset for training
+MAX_LEN = 200            # Pad sequences to 200 tokens (assignment requirement)
+BATCH_SIZE = 32
+EMBED_DIM = 128
+HIDDEN_DIM = 256         # Assignment requirement: hidden=256
+N_LAYERS = 2             # Assignment requirement: 2 layers
+DROPOUT = 0.3            # Assignment requirement: dropout=0.3
+EPOCHS = 5
+LR = 0.001
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# =====================
-# LOAD DATA
-# =====================
-df = pd.read_csv("WELFake_Dataset.csv")
-df = df.dropna(subset=['title', 'text', 'label'])
-df['text'] = df['title'] + " " + df['text']
+def build_vocab(token_lists):
+    """Build word-to-index vocabulary from tokenized texts."""
+    vocab = set()
+    for tokens in token_lists:
+        vocab.update(tokens)
+    word_to_idx = {'<PAD>': 0, '<UNK>': 1}
+    for i, word in enumerate(sorted(vocab)):
+        word_to_idx[word] = i + 2
+    return word_to_idx
 
-# =====================
-# PREPROCESS
-# =====================
-df['clean'] = df['text'].apply(preprocess_text)
 
-# =====================
-# FEATURES
-# =====================
-X_num = np.array(df['clean'].apply(extract_features).tolist())
-y = df['label'].values
+def print_comparison_table(results):
+    """Print a formatted comparison table of BiLSTM results."""
+    print("\n" + "=" * 65)
+    print("  DL OBJECTIVE — BiLSTM Comparison Results")
+    print("=" * 65)
+    print(f"  {'Model':<30} {'Accuracy':>10} {'AUC-ROC':>10}")
+    print("-" * 65)
+    for name, metrics in results.items():
+        print(f"  {name:<30} {metrics['accuracy']:>10.4f} {metrics['auc']:>10.4f}")
+    print("=" * 65)
 
-# =====================
-# TOKENIZATION
-# =====================
-tokenizer = Tokenizer(num_words=20000)
-tokenizer.fit_on_texts(df['clean'])
 
-seqs = tokenizer.texts_to_sequences(df['clean'])
-X_pad = pad_sequences(seqs, maxlen=100)
+def run_bilstm_training():
+    """
+    Full DL Objective training pipeline.
+    Trains BiLSTM+Attention and BiLSTM (no attention), compares them,
+    and generates attention heatmap visualizations.
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"Device: {DEVICE}")
+    print(f"Dataset: {DATA_PATH}")
 
-# =====================
-# SCALING
-# =====================
-scaler = StandardScaler()
-X_num = scaler.fit_transform(X_num)
+    # =====================
+    # 1. LOAD AND PREPROCESS
+    # =====================
+    print("\n[Step 1] Loading and preprocessing data...")
+    loader = NewsDataset(DATA_PATH, max_len=MAX_LEN)
+    df = loader.load_data()
 
-# =====================
-# SPLIT
-# =====================
-X_text_tr, X_text_te, X_num_tr, X_num_te, y_tr, y_te = train_test_split(
-    X_pad, X_num, y, test_size=0.2, random_state=42
-)
+    # Use subset for tractable training time
+    if SUBSET_SIZE and SUBSET_SIZE < len(df):
+        df = df.sample(SUBSET_SIZE, random_state=42).reset_index(drop=True)
+        print(f"  Using subset of {SUBSET_SIZE} samples.")
+    else:
+        print(f"  Using full dataset: {len(df)} samples.")
 
-# =====================
-# BASELINE MODELS
-# =====================
-print("\n==== BASELINE MODELS ====")
+    # Tokenize with NLTK (lowercase + remove HTML handled inside preprocess)
+    print("  Tokenizing with NLTK...")
+    df['clean_tokens'] = df['content'].apply(loader.preprocess)
+    df['clean_text'] = df['clean_tokens'].apply(lambda x: " ".join(x))
 
-# Convert text to simple features for ML
-X_flat_tr = X_text_tr.reshape(X_text_tr.shape[0], -1)
-X_flat_te = X_text_te.reshape(X_text_te.shape[0], -1)
+    # =====================
+    # 2. BUILD VOCABULARY
+    # =====================
+    print("\n[Step 2] Building vocabulary...")
+    word_to_idx = build_vocab(df['clean_tokens'])
+    print(f"  Vocabulary size: {len(word_to_idx)}")
 
-# Logistic Regression
-lr = LogisticRegression(max_iter=200)
-lr.fit(X_flat_tr, y_tr)
-lr_pred = lr.predict(X_flat_te)
-lr_prob = lr.predict_proba(X_flat_te)[:,1]
+    # =====================
+    # 3. PREPARE SEQUENCES
+    # =====================
+    print("\n[Step 3] Preparing padded sequences (max_len={})...".format(MAX_LEN))
+    X_seq = prepare_sequences(df['clean_tokens'], word_to_idx, max_len=MAX_LEN)
+    y = df['label'].values
 
-print("\nLogistic Regression:")
-print(classification_report(y_te, lr_pred))
-print("ROC-AUC:", roc_auc_score(y_te, lr_prob))
+    # Train/Test split (80/20)
+    X_tr, X_te, y_tr, y_te = train_test_split(X_seq, y, test_size=0.2, random_state=42)
 
-# Naive Bayes
-nb = MultinomialNB()
-nb.fit(np.abs(X_flat_tr), y_tr)  # NB needs non-negative
-nb_pred = nb.predict(np.abs(X_flat_te))
-nb_prob = nb.predict_proba(np.abs(X_flat_te))[:,1]
+    train_ds = TensorDataset(torch.tensor(X_tr, dtype=torch.long),
+                             torch.tensor(y_tr, dtype=torch.long))
+    test_ds = TensorDataset(torch.tensor(X_te, dtype=torch.long),
+                            torch.tensor(y_te, dtype=torch.long))
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE)
 
-print("\nNaive Bayes:")
-print(classification_report(y_te, nb_pred))
-print("ROC-AUC:", roc_auc_score(y_te, nb_prob))
+    results = {}
 
-# =====================
-# LSTM MODEL
-# =====================
-print("\n==== LSTM MODEL ====")
+    # =====================
+    # 4. TRAIN BiLSTM + ATTENTION
+    # =====================
+    print("\n[Step 4a] Training BiLSTM + Self-Attention...")
+    print(f"  Config: hidden={HIDDEN_DIM}, layers={N_LAYERS}, dropout={DROPOUT}, "
+          f"BCELoss + Adam(lr={LR}), epochs={EPOCHS}")
 
-text_in = Input(shape=(100,))
-x = Embedding(20000, 100)(text_in)
-x = LSTM(128)(x)
+    model_attn = BiLSTMWithAttention(
+        vocab_size=len(word_to_idx),
+        embed_dim=EMBED_DIM,
+        hidden_dim=HIDDEN_DIM,
+        n_layers=N_LAYERS,
+        dropout=DROPOUT,
+        use_attention=True
+    )
+    model_attn = train_model(model_attn, train_loader, None,
+                             epochs=EPOCHS, lr=LR, device=DEVICE)
+    acc_attn, auc_attn = evaluate_model(model_attn, test_loader, device=DEVICE)
+    results['BiLSTM + Attention'] = {'accuracy': acc_attn, 'auc': auc_attn}
+    print(f"  => Accuracy: {acc_attn:.4f}, AUC-ROC: {auc_attn:.4f}")
 
-num_in = Input(shape=(5,))
-y2 = Dense(32, activation="relu")(num_in)
+    # =====================
+    # 5. TRAIN BiLSTM (NO ATTENTION)
+    # =====================
+    print("\n[Step 4b] Training BiLSTM (No Attention)...")
+    model_no_attn = BiLSTMWithAttention(
+        vocab_size=len(word_to_idx),
+        embed_dim=EMBED_DIM,
+        hidden_dim=HIDDEN_DIM,
+        n_layers=N_LAYERS,
+        dropout=DROPOUT,
+        use_attention=False
+    )
+    model_no_attn = train_model(model_no_attn, train_loader, None,
+                                epochs=EPOCHS, lr=LR, device=DEVICE)
+    acc_no, auc_no = evaluate_model(model_no_attn, test_loader, device=DEVICE)
+    results['BiLSTM (No Attention)'] = {'accuracy': acc_no, 'auc': auc_no}
+    print(f"  => Accuracy: {acc_no:.4f}, AUC-ROC: {auc_no:.4f}")
 
-merged = Concatenate()([x, y2])
-out = Dense(1, activation="sigmoid")(merged)
+    # =====================
+    # 6. COMPARISON TABLE
+    # =====================
+    print_comparison_table(results)
 
-model = Model([text_in, num_in], out)
-model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    # =====================
+    # 7. ATTENTION HEATMAPS
+    # =====================
+    print("\n[Step 5] Generating attention heatmaps...")
 
-model.fit(
-    [X_text_tr, X_num_tr],
-    y_tr,
-    epochs=5,
-    batch_size=128,
-    validation_split=0.1
-)
+    # Find a correctly-classified Fake example
+    model_attn.eval()
+    fake_indices = df[df['label'] == 1].index.tolist()
+    real_indices = df[df['label'] == 0].index.tolist()
 
-# =====================
-# EVALUATION
-# =====================
-y_pred_prob = model.predict([X_text_te, X_num_te]).flatten()
-y_pred = (y_pred_prob > 0.5).astype(int)
+    for label_name, indices, fname in [
+        ("Fake", fake_indices, "attention_heatmap_fake.png"),
+        ("Real", real_indices, "attention_heatmap_real.png"),
+    ]:
+        for idx in indices[:20]:  # search within first 20
+            sample_tensor = torch.tensor(X_seq[idx]).unsqueeze(0)
+            with torch.no_grad():
+                prob, _ = model_attn(sample_tensor.to(DEVICE))
+            pred = 1 if prob.item() > 0.5 else 0
+            if pred == df['label'].iloc[idx]:
+                tokens = df['clean_tokens'].iloc[idx][:50]  # first 50 tokens for readability
+                get_attention_and_plot(model_attn, sample_tensor, tokens,
+                                      device=DEVICE, filename=fname)
+                print(f"  Saved {fname} (correctly classified {label_name} article)")
+                break
 
-print("\nLSTM Results:")
-print(classification_report(y_te, y_pred))
-print("ROC-AUC:", roc_auc_score(y_te, y_pred_prob))
+    # =====================
+    # 8. SAVE MODELS
+    # =====================
+    print("\n[Step 6] Saving models and vocabulary...")
+    torch.save(model_attn.state_dict(), os.path.join(OUTPUT_DIR, "bilstm_attn.pth"))
+    torch.save(model_no_attn.state_dict(), os.path.join(OUTPUT_DIR, "bilstm_no_attn.pth"))
 
-# =====================
-# SAVE
-# =====================
-os.makedirs("output", exist_ok=True)
+    with open(os.path.join(OUTPUT_DIR, "word_to_idx.pkl"), "wb") as f:
+        pickle.dump(word_to_idx, f)
 
-model.save("output/lstm_model.h5")
-pickle.dump(tokenizer, open("output/tokenizer.pkl", "wb"))
-pickle.dump(scaler, open("output/scaler.pkl", "wb"))
+    # Save results to file
+    with open(os.path.join(OUTPUT_DIR, "bilstm_results.txt"), "w") as f:
+        f.write("DL Objective — BiLSTM Comparison Results\n")
+        f.write("=" * 55 + "\n")
+        f.write(f"{'Model':<30} {'Accuracy':>10} {'AUC-ROC':>10}\n")
+        f.write("-" * 55 + "\n")
+        for name, metrics in results.items():
+            f.write(f"{name:<30} {metrics['accuracy']:>10.4f} {metrics['auc']:>10.4f}\n")
+        f.write("=" * 55 + "\n")
 
-print("\nAll models evaluated. LSTM saved as final model.")
+    print(f"\n  All outputs saved to {OUTPUT_DIR}/")
+    print("  DL Objective complete.\n")
+
+    return model_attn, word_to_idx, results
+
+
+if __name__ == "__main__":
+    run_bilstm_training()

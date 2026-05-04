@@ -12,31 +12,56 @@ TruthLens AI is a high-fidelity, production-grade fake news detection platform. 
 - **Linguistic Heuristics**: Custom calibration using journalistic trust markers and sensationalism scoring to reduce false positives.
 - **Premium Glassmorphic UI**: A high-end, responsive dashboard featuring dark mode, neural backgrounds, and fluid animations.
 
-
-
 ## 🏗️ Model Architecture
 
-### 1. Hybrid BERT Model
-A BERT-based transformer model augmented with a classical feature layer. It processes the full context of the news article while simultaneously considering:
-- **TF-IDF Vectorization**: Capture key statistical word importance.
-- **POS Analysis**: Detect linguistic patterns common in misinformation (e.g., high adjective density).
-- **Sentiment Analysis**: Analyze emotional tone and sensationalism.
+### 1. BiLSTM with Self-Attention (DL Objective — CSR311)
+A Bidirectional LSTM network (hidden=256, 2 layers, dropout=0.3) with a **Scaled Dot-Product Self-Attention** layer that provides transparency by assigning weights to each token.
 
-### 2. BiLSTM with Attention
-A bidirectional LSTM network that captures sequential dependencies. The **Self-Attention** layer provides transparency by assigning weights to each token, allowing users to see the model's "thought process."
+- **Loss**: BCELoss  
+- **Optimizer**: Adam  
+- **Tokenization**: NLTK `word_tokenize`, padded to 200 tokens  
+- **Comparison**: BiLSTM+Attention vs BiLSTM (No Attention) — reported via Accuracy and AUC-ROC
+
+### 2. Hybrid BERT Model (NLP Objective — CSR322)
+A BERT-based transformer model (`bert-base-uncased`) augmented with a classical feature layer:
+- **TF-IDF Vectorization**: n-gram (1,2) statistical word importance
+- **POS Analysis**: Adjective-to-noun ratio via NLTK POS tagging
+- **Sentiment Analysis**: VADER compound, positive, negative, neutral scores
+
+**Three-way comparison** reported via F1:
+- (a) BERT alone
+- (b) Classical features alone
+- (c) Hybrid (BERT [CLS] + Classical features)
 
 ### 3. Smart Calibration Ensemble
-The system uses a weighted ensemble (60% BERT / 40% BiLSTM) which is then dynamically adjusted by heuristic scores:
-- **Trust Markers**: Keywords typical of credible journalism.
-- **Sensationalism Markers**: Phrases often used in clickbait and misinformation.
+The system uses a weighted ensemble (60% BERT / 40% BiLSTM) dynamically adjusted by heuristic scores:
+- **Trust Markers**: Keywords typical of credible journalism
+- **Sensationalism Markers**: Phrases often used in clickbait and misinformation
+
+## 📊 Dataset
+
+The models are trained on the **WELFake Dataset**, a comprehensive collection of **72,000+ news articles** categorized as "Real" (label=0) or "Fake" (label=1). The dataset combines articles from four sources: Kaggle, McIntire, Reuters, and BuzzFeed Political.
+
+| Property | Value |
+|----------|-------|
+| Total Articles | 72,134 |
+| Fake Articles | ~35,000 |
+| Real Articles | ~37,000 |
+| Features | Title, Text, Label |
+| Format | CSV |
 
 ## 🛠️ Tech Stack
 
-- **Backend**: FastAPI (Python)
-- **Deep Learning**: PyTorch, HuggingFace Transformers
-- **NLP**: NLTK, Scikit-Learn
-- **Frontend**: Vanilla HTML5, CSS3 (Modern Glassmorphism), JavaScript
-- **API**: RESTful architecture with CORS support
+| Category | Technology | Purpose |
+|----------|-----------|---------|
+| Deep Learning | PyTorch | Model definition, training, inference |
+| Transformers | HuggingFace | Pre-trained BERT model and tokenizer |
+| NLP | NLTK | Tokenization, POS tagging, VADER sentiment |
+| ML Utilities | Scikit-Learn | TF-IDF vectorization, train/test split |
+| Visualization | Matplotlib, Seaborn | Attention heatmap plots |
+| Backend API | FastAPI + Pydantic | Async REST API, input validation |
+| Frontend | HTML5, CSS3, Vanilla JS | Glassmorphism UI, attention heatmap rendering |
+| DevOps | Docker + Docker Compose | Containerization |
 
 ## ⚡ Installation & Setup
 
@@ -47,41 +72,77 @@ cd "Fake News Detection"
 ```
 
 ### 2. Standard Local Setup
-It is recommended to use a virtual environment:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
-python -m nltk.downloader punkt averaged_perceptron_tagger vader_lexicon
+python -m nltk.downloader punkt punkt_tab averaged_perceptron_tagger vader_lexicon stopwords wordnet
 ```
 
-### 3. Running with Docker (Recommended for Production)
-The system is fully containerized for one-command deployment:
+### 3. Run the Full Experiment
+This trains all models, runs comparisons, generates heatmaps, and produces error analysis:
 ```bash
-docker-compose up --build
+python main.py
 ```
-This will:
-1. Build the production image.
-2. Install all dependencies and NLTK resources.
-3. Start the Gunicorn server with 4 workers.
-4. Serve the frontend at `http://localhost:8000`.
 
-### 4. Direct Execution
+**Output files** (saved to `output/`):
+- `bilstm_attn.pth` — Trained BiLSTM + Attention model
+- `bert_hybrid.pth` — Trained Hybrid BERT model
+- `word_to_idx.pkl` — Vocabulary mapping
+- `tfidf_vectorizer.pkl` — Fitted TF-IDF vectorizer
+- `error_analysis.csv` — 20 misclassified examples with failure modes
+- `experiment_results.txt` — Full results summary
+- `attention_heatmap_fake.png` — Heatmap for a correctly classified Fake article
+- `attention_heatmap_real.png` — Heatmap for a correctly classified Real article
+- `attention_heatmap_misclassified.png` — Heatmap for a misclassified article
+
+### 4. Run the BiLSTM Training Only (DL Objective)
+```bash
+python src/train.py
+```
+
+### 5. Launch the Web Application
 ```bash
 python app.py
 ```
-*Note: In production, use the Docker setup or Gunicorn directly.*
+Then open `http://localhost:8000` in your browser.
+
+### 6. Running with Docker (Production)
+```bash
+docker-compose up --build
+```
 
 ## 📈 Monitoring & Logs
-The system generates an `app.log` file in the root directory. You can monitor it in real-time:
+The system generates an `app.log` file in the root directory:
 ```bash
 tail -f app.log
 ```
-Or check the health endpoint: `http://localhost:8000/health`
+Health endpoint: `http://localhost:8000/health`
 
+## 📁 Project Structure
 
-## 📊 Dataset
-The models are trained on the **WELFake Dataset**, a comprehensive collection of 72,000+ news articles categorized as "Real" or "Fake".
+```
+truthlens-ai/
+├── app.py                      # FastAPI entry point, routing, lifespan model loading
+├── config.py                   # Pydantic settings and configuration
+├── main.py                     # Full experiment runner (both objectives)
+├── docker-compose.yml          # Multi-container orchestration
+├── Dockerfile                  # Container build specification
+├── requirements.txt            # Python dependencies
+├── WELFake_Dataset.csv         # Training dataset
+├── src/
+│   ├── bilstm_attention.py     # BiLSTM + Scaled Dot-Product Attention (PyTorch)
+│   ├── bert_hybrid.py          # Hybrid BERT + classical features model (PyTorch)
+│   ├── feature_extractor.py    # Classical NLP features (TF-IDF, POS, Sentiment)
+│   ├── data_loader.py          # Dataset ingestion, NLTK tokenization, padding
+│   ├── train.py                # Standalone DL Objective training script
+│   ├── predict.py              # Interactive PyTorch prediction CLI
+│   ├── utils.py                # Text preprocessing utilities
+│   └── visualize_attention.py  # Attention heatmap generation (Matplotlib)
+├── output/                     # Saved models, results, and heatmaps
+└── frontend/
+    └── index.html              # Glassmorphism UI with attention visualization
+```
 
 ---
-*Developed with excellence in AI and Design.*
+*Developed with excellence in AI and Design.*
