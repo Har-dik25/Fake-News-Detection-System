@@ -20,11 +20,7 @@ class Settings(BaseSettings):
     TFIDF_MODEL_PATH: str = os.path.join(OUTPUT_DIR, "tfidf_vectorizer.pkl")
     
     # Security
-    CORS_ORIGINS: List[str] = ["*"] # Change to specific domains in real production
-    
-    # Heuristics
-    TRUST_MARKERS: List[str] = ["according to", "reported by", "stated that", "spokesperson", "official sources", "confirmed by", "citing"]
-    SENSATIONAL_MARKERS: List[str] = ["shocker", "you won't believe", "exposed!", "conspiracy", "hidden truth", "they don't want you to know"]
+    CORS_ORIGINS: List[str] = ["http://localhost:8000", "http://127.0.0.1:8000"]
 
     class Config:
         env_file = ".env"

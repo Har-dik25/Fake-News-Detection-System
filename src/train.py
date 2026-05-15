@@ -34,9 +34,10 @@ from src.visualize_attention import get_attention_and_plot
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, "WELFake_Dataset.csv")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-SUBSET_SIZE = 5000       # Use a meaningful subset for training
-MAX_LEN = 200            # Pad sequences to 200 tokens (assignment requirement)
-BATCH_SIZE = 32
+SUBSET_SIZE = None       # Use the full dataset for training
+MAX_LEN = 512            # Match BERT's max context window for full article analysis
+BATCH_SIZE = 16
+ACCUMULATION_STEPS = 4
 EMBED_DIM = 128
 HIDDEN_DIM = 256         # Assignment requirement: hidden=256
 N_LAYERS = 2             # Assignment requirement: 2 layers

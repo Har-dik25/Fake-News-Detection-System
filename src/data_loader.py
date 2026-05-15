@@ -7,7 +7,7 @@ from nltk.corpus import stopwords
 import os
 
 class NewsDataset:
-    def __init__(self, filepath, max_len=200):
+    def __init__(self, filepath, max_len=512):
         self.filepath = filepath
         self.max_len = max_len
         self.df = None
@@ -42,7 +42,7 @@ class NewsDataset:
     def get_binary_labels(self):
         return self.df['label'].values
 
-def prepare_sequences(tokens_list, word_to_idx, max_len=200):
+def prepare_sequences(tokens_list, word_to_idx, max_len=512):
     sequences = []
     for tokens in tokens_list:
         seq = [word_to_idx.get(t, word_to_idx['<UNK>']) for t in tokens]

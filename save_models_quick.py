@@ -1,3 +1,18 @@
+"""
+save_models_quick.py — Development Utility (NOT for production)
+
+Creates placeholder/untrained model weights and a dummy vocabulary so the
+FastAPI web app (`app.py`) can boot and serve the frontend without running
+the full multi-hour training pipeline (`main.py` or `src/train.py`).
+
+WARNING: Models saved by this script contain RANDOM WEIGHTS. Predictions
+will be meaningless. For real predictions, run `python main.py` first to
+train models on the WELFake dataset, then start the app.
+
+Usage:
+    python save_models_quick.py
+"""
+
 import torch
 import os
 from src.bilstm_attention import BiLSTMWithAttention

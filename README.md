@@ -14,7 +14,7 @@ TruthLens AI is a high-fidelity, production-grade fake news detection platform. 
 
 ## 🏗️ Model Architecture
 
-### 1. BiLSTM with Self-Attention (DL Objective — CSR311)
+### 1. BiLSTM with Self-Attention
 A Bidirectional LSTM network (hidden=256, 2 layers, dropout=0.3) with a **Scaled Dot-Product Self-Attention** layer that provides transparency by assigning weights to each token.
 
 - **Loss**: BCELoss  
@@ -22,7 +22,7 @@ A Bidirectional LSTM network (hidden=256, 2 layers, dropout=0.3) with a **Scaled
 - **Tokenization**: NLTK `word_tokenize`, padded to 200 tokens  
 - **Comparison**: BiLSTM+Attention vs BiLSTM (No Attention) — reported via Accuracy and AUC-ROC
 
-### 2. Hybrid BERT Model (NLP Objective — CSR322)
+### 2. Hybrid BERT Model
 A BERT-based transformer model (`bert-base-uncased`) augmented with a classical feature layer:
 - **TF-IDF Vectorization**: n-gram (1,2) statistical word importance
 - **POS Analysis**: Adjective-to-noun ratio via NLTK POS tagging
@@ -96,7 +96,7 @@ python main.py
 - `attention_heatmap_real.png` — Heatmap for a correctly classified Real article
 - `attention_heatmap_misclassified.png` — Heatmap for a misclassified article
 
-### 4. Run the BiLSTM Training Only (DL Objective)
+### 4. Run the BiLSTM Training Only
 ```bash
 python src/train.py
 ```
@@ -125,7 +125,7 @@ Health endpoint: `http://localhost:8000/health`
 truthlens-ai/
 ├── app.py                      # FastAPI entry point, routing, lifespan model loading
 ├── config.py                   # Pydantic settings and configuration
-├── main.py                     # Full experiment runner (both objectives)
+├── main.py                     # Full experiment runner (both architectures)
 ├── docker-compose.yml          # Multi-container orchestration
 ├── Dockerfile                  # Container build specification
 ├── requirements.txt            # Python dependencies
@@ -135,7 +135,7 @@ truthlens-ai/
 │   ├── bert_hybrid.py          # Hybrid BERT + classical features model (PyTorch)
 │   ├── feature_extractor.py    # Classical NLP features (TF-IDF, POS, Sentiment)
 │   ├── data_loader.py          # Dataset ingestion, NLTK tokenization, padding
-│   ├── train.py                # Standalone DL Objective training script
+│   ├── train.py                # Standalone BiLSTM training script
 │   ├── predict.py              # Interactive PyTorch prediction CLI
 │   ├── utils.py                # Text preprocessing utilities
 │   └── visualize_attention.py  # Attention heatmap generation (Matplotlib)

@@ -27,9 +27,10 @@ from src.bert_hybrid import HybridBERTModel, train_bert_hybrid, evaluate_bert_hy
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(BASE_DIR, "WELFake_Dataset.csv")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-SUBSET_SIZE = 10000
-MAX_LEN = 200
-BATCH_SIZE = 32
+SUBSET_SIZE = None
+MAX_LEN = 512
+BATCH_SIZE = 16
+ACCUMULATION_STEPS = 4
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Heuristic keywords for failure-mode categorization
@@ -158,7 +159,8 @@ def run_experiment():
     # =====================================================
     loader = NewsDataset(DATA_PATH, max_len=MAX_LEN)
     df = loader.load_data()
-    df = df.sample(SUBSET_SIZE, random_state=42).reset_index(drop=True)
+    if SUBSET_SIZE and SUBSET_SIZE < len(df):
+        df = df.sample(SUBSET_SIZE, random_state=42).reset_index(drop=True)
 
     print("Preprocessing text...")
     df['clean_tokens'] = df['content'].apply(loader.preprocess)

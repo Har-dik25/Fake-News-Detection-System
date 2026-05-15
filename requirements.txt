@@ -13,3 +13,10 @@ python-dotenv
 python-multipart
 matplotlib
 seaborn
+duckduckgo-search
+pytest
+pytest-asyncio
+diskcache
+kaggle
+tenacity
+slowapi

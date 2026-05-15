@@ -3,6 +3,8 @@ import os
 import time
 import pickle
 import numpy as np
+import json
+from diskcache import Deque
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,7 +16,18 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+import asyncio
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
+
 
 # Import configuration
 from config import settings
@@ -22,7 +35,7 @@ from config import settings
 # Import model architectures
 from src.bilstm_attention import BiLSTMWithAttention
 from src.bert_hybrid import HybridBERTModel
-from src.data_loader import prepare_sequences
+from src.data_loader import prepare_sequences, NewsDataset
 from src.feature_extractor import ClassicalFeatureExtractor
 
 # Configure Logging
@@ -44,19 +57,24 @@ async def lifespan(app: FastAPI):
     # Startup: Load models and resources
     logger.info("Initializing production resources...")
     try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        resources["device"] = device
+        
         # Load word_to_idx
         with open(settings.WORD_TO_IDX_PATH, "rb") as f:
             resources["word_to_idx"] = pickle.load(f)
         
         # Load BiLSTM
         bilstm = BiLSTMWithAttention(len(resources["word_to_idx"]), 128, 256, 2, use_attention=True)
-        bilstm.load_state_dict(torch.load(settings.BILSTM_MODEL_PATH, map_location='cpu'))
+        bilstm.load_state_dict(torch.load(settings.BILSTM_MODEL_PATH, map_location=device))
+        bilstm.to(device)
         bilstm.eval()
         resources["bilstm_model"] = bilstm
         
         # Load BERT
         bert = HybridBERTModel(107, mode='hybrid')
-        bert.load_state_dict(torch.load(settings.BERT_MODEL_PATH, map_location='cpu'))
+        bert.load_state_dict(torch.load(settings.BERT_MODEL_PATH, map_location=device))
+        bert.to(device)
         bert.eval()
         resources["bert_model"] = bert
         
@@ -80,6 +98,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
@@ -89,8 +111,8 @@ app.add_middleware(
 )
 
 class NewsInput(BaseModel):
-    title: str
-    text: str
+    title: str = Field(..., min_length=1, max_length=500)
+    text: str = Field(..., min_length=1, max_length=20000)
 
 # Exception Handler
 @app.exception_handler(Exception)
@@ -98,155 +120,109 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Global exception: {exc} at {request.url}")
     return JSONResponse(
         status_code=500,
-        content={"message": "Internal Server Error", "detail": str(exc)},
+        content={"message": "Internal Server Error", "detail": "An unexpected error occurred. Please try again later."},
     )
 
 # ============================================================
 # Prediction History for Model Calibration Detection
 # ============================================================
-_prediction_history = []  # tracks recent model outputs to detect bias
+_prediction_history = Deque(directory=os.path.join(settings.BASE_DIR, 'cache', 'history'))
 
-def compute_heuristic_score(content: str) -> dict:
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
+def perform_search(query):
+    return list(DDGS().text(query, max_results=5))
+
+async def live_fact_check(title: str, text: str) -> dict:
     """
-    Comprehensive linguistic heuristic analysis.
-    Returns a score between 0.0 (very credible) and 1.0 (very suspicious).
+    Live fact-checking using DuckDuckGo search.
+    Searches the headline/core claim and checks if reputable domains are reporting it.
     """
-    content_lower = content.lower()
-    words = content_lower.split()
-    word_count = len(words)
+    heuristic_prob = 0.5
+    details = {"trust_markers": 0, "sensationalism": 0}
     
-    fake_signals = 0.0
-    real_signals = 0.0
-    signal_count = 0
-    details = {}
-    
-    # --- 1. Sensationalism markers (strong fake signal) ---
-    sensational_phrases = [
-        "you won't believe", "shocker", "exposed!", "conspiracy",
-        "hidden truth", "they don't want you to know", "cover-up",
-        "breaking:", "urgent!", "share before deleted", "mainstream media won't",
-        "big pharma", "wake up", "sheeple", "miracle cure", "secret remedy",
-        "the truth about", "exposed", "bombshell", "jaw-dropping",
-        "mind-blowing", "insane", "unbelievable", "devastating",
-    ]
-    sensational_count = sum(1 for p in sensational_phrases if p in content_lower)
-    if sensational_count > 0:
-        fake_signals += min(sensational_count * 0.15, 0.5)
-        signal_count += 1
-    details["sensationalism"] = sensational_count
-    
-    # --- 2. Trust / attribution markers (strong real signal) ---
-    trust_phrases = [
-        "according to", "reported by", "stated that", "spokesperson",
-        "official sources", "confirmed by", "citing", "peer-reviewed",
-        "published in", "research shows", "data indicates", "study finds",
-        "the associated press", "reuters", "said in a statement",
-        "press release", "university of", "department of",
-        "in a report", "evidence suggests", "analysis shows",
-    ]
-    trust_count = sum(1 for p in trust_phrases if p in content_lower)
-    if trust_count > 0:
-        real_signals += min(trust_count * 0.12, 0.5)
-        signal_count += 1
-    details["trust_markers"] = trust_count
-    
-    # --- 3. Exclamation / all-caps density (fake signal) ---
-    exclamation_ratio = content.count('!') / max(word_count, 1)
-    if exclamation_ratio > 0.05:
-        fake_signals += min(exclamation_ratio * 2, 0.3)
-        signal_count += 1
-    
-    upper_words = sum(1 for w in content.split() if w.isupper() and len(w) > 2)
-    caps_ratio = upper_words / max(word_count, 1)
-    if caps_ratio > 0.1:
-        fake_signals += min(caps_ratio, 0.2)
-        signal_count += 1
-    
-    # --- 4. Sentiment extremity (VADER) ---
+    if DDGS is None:
+        logger.warning("duckduckgo_search not installed. Falling back to neutral heuristics.")
+        details["heuristic_prob"] = heuristic_prob
+        return {"score": heuristic_prob, "details": details}
+        
     try:
-        from nltk.sentiment.vader import SentimentIntensityAnalyzer
-        sid = SentimentIntensityAnalyzer()
-        scores = sid.polarity_scores(content)
-        compound = scores['compound']
-        # Extreme sentiment (very positive or very negative) = suspicious
-        extremity = abs(compound)
-        if extremity > 0.7:
-            fake_signals += 0.15
-            signal_count += 1
-        elif extremity < 0.3:
-            real_signals += 0.1
-            signal_count += 1
-        details["sentiment_compound"] = compound
-    except:
-        details["sentiment_compound"] = 0.0
-    
-    # --- 5. Text length (very short = less reliable either way) ---
-    if word_count < 20:
-        fake_signals += 0.05  # short text is slightly suspicious
-    elif word_count > 100:
-        real_signals += 0.1   # longer, more detailed = slightly more credible
-    
-    # --- 6. Question marks / clickbait patterns ---
-    question_ratio = content.count('?') / max(word_count, 1)
-    if question_ratio > 0.03:
-        fake_signals += 0.1
-        signal_count += 1
-    
-    # --- 7. Hedging language (real news hedges, fake news asserts absolutely) ---
-    hedging = ["may", "might", "could", "possibly", "reportedly", "allegedly",
-               "it appears", "sources say", "is believed to", "likely"]
-    hedge_count = sum(1 for h in hedging if h in content_lower)
-    if hedge_count > 0:
-        real_signals += min(hedge_count * 0.08, 0.25)
-        signal_count += 1
-    
-    # --- 8. Absolute/emotional language (fake signal) ---
-    absolutes = ["always", "never", "everyone knows", "nobody can deny",
-                 "100%", "guaranteed", "proven fact", "undeniable",
-                 "exposed", "exposed!"]
-    absolute_count = sum(1 for a in absolutes if a in content_lower)
-    if absolute_count > 0:
-        fake_signals += min(absolute_count * 0.1, 0.3)
-        signal_count += 1
-    
-    # Compute final heuristic score: 0.0 = very real, 1.0 = very fake
-    if signal_count == 0:
-        heuristic_prob = 0.45  # neutral when no signals
-    else:
-        heuristic_prob = 0.5 + (fake_signals - real_signals)
-    
-    heuristic_prob = max(0.05, min(0.95, heuristic_prob))
-    
-    details["fake_signals"] = round(fake_signals, 3)
-    details["real_signals"] = round(real_signals, 3)
+        search_query = title[:200]  # First 200 chars of title
+        # Run search in a background thread with retry and timeout to prevent blocking
+        results = await asyncio.wait_for(
+            asyncio.to_thread(lambda: perform_search(search_query)),
+            timeout=10.0
+        )
+        
+        domains_path = os.path.join(settings.BASE_DIR, 'config', 'domains.json')
+        try:
+            with open(domains_path, 'r') as f:
+                domains_config = json.load(f)
+                reputable_domains = domains_config.get('reputable_domains', [])
+                unreliable_domains = domains_config.get('unreliable_domains', [])
+        except Exception as e:
+            logger.error(f"Could not load domains config: {e}")
+            reputable_domains = []
+            unreliable_domains = []
+        
+        reputable_matches = 0
+        unreliable_matches = 0
+        
+        for res in results:
+            url = res.get('href', '').lower()
+            if any(domain in url for domain in reputable_domains):
+                reputable_matches += 1
+            if any(domain in url for domain in unreliable_domains):
+                unreliable_matches += 1
+                
+        details["reputable_sources_found"] = reputable_matches
+        details["unreliable_sources_found"] = unreliable_matches
+        details["search_completed"] = True
+        
+        if reputable_matches > 0:
+            heuristic_prob = max(0.1, 0.5 - (reputable_matches * 0.15))
+        elif unreliable_matches > 0:
+            heuristic_prob = min(0.9, 0.5 + (unreliable_matches * 0.15))
+        elif len(results) == 0:
+            # If no one is reporting it, it's highly suspicious
+            heuristic_prob = 0.8
+            
+    except Exception as e:
+        logger.error(f"Live fact check failed: {e}")
+        details["search_error"] = str(e)
+        
     details["heuristic_prob"] = round(heuristic_prob, 3)
-    
     return {"score": heuristic_prob, "details": details}
+
 
 
 def detect_model_calibration() -> float:
     """
-    Returns a confidence weight for ML models. 
-    A fixed high trust is used since the models are pre-trained and highly accurate.
+    Returns a dynamic confidence weight for ML models based on recent prediction variance.
+    If the model keeps predicting the same thing (all fake or all real), trust drops.
     """
-    return 0.85  # Trust the neural models 85%, leaving 15% for heuristic tuning
+    if len(_prediction_history) < 10:
+        return 0.85  # Not enough data yet, use default trust
+    
+    recent = list(_prediction_history)[-50:]
+    mean_prob = sum(recent) / len(recent)
+    variance = sum((p - mean_prob) ** 2 for p in recent) / len(recent)
+    
+    # If variance is very low (model stuck on one prediction), reduce trust
+    if variance < 0.01:
+        return 0.50  # Model seems biased, shift weight to heuristics
+    elif variance < 0.05:
+        return 0.70
+    else:
+        return 0.85  # Healthy variance, trust the model
 
 
 @app.post("/predict")
-async def predict(data: NewsInput):
+@limiter.limit("5/minute")
+async def predict(request: Request, data: NewsInput):
     start_time = time.time()
     
-    # Heuristic text cleaning: filter out UI boilerplate and short navigation links
-    raw_lines = data.text.split('\n')
-    cleaned_lines = []
-    for line in raw_lines:
-        words = line.strip().split()
-        # Only keep lines with substantial word counts (prose), ignore short UI elements and common photo credits
-        if len(words) > 10 and 'Getty Images' not in line:
-            cleaned_lines.append(line.strip())
-            
-    # If cleaning stripped everything (e.g. valid short text), fallback to raw text
-    cleaned_text = " ".join(cleaned_lines) if cleaned_lines else data.text
+    # Deep text cleaning to match training pipeline (strips HTML, normalizes spaces)
+    cleaned_text = NewsDataset.clean_text(data.text)
     
     content = data.title + " " + cleaned_text
     content_lower = content.lower()
@@ -258,35 +234,48 @@ async def predict(data: NewsInput):
         # 1. BiLSTM Prediction & Attention
         tokens = word_tokenize(content_lower)
         clean_tokens = [t for t in tokens if t.isalnum()]
-        seq = prepare_sequences([clean_tokens], resources["word_to_idx"], max_len=200)
+        seq = prepare_sequences([clean_tokens], resources["word_to_idx"], max_len=512)
         
-        with torch.no_grad():
-            prob_bilstm_raw, attn_weights = resources["bilstm_model"](torch.tensor(seq))
-            prob_bilstm = float(prob_bilstm_raw[0][0])
-            weights = torch.mean(attn_weights[0], dim=0).cpu().numpy().tolist()
+        def run_bilstm():
+            with torch.no_grad():
+                seq_tensor = torch.tensor(seq).to(resources["device"])
+                prob_bilstm_raw, attn_weights = resources["bilstm_model"](seq_tensor)
+                prob_bilstm = float(prob_bilstm_raw[0][0])
+                weights = torch.mean(attn_weights[0], dim=0).cpu().numpy().tolist()
+                return prob_bilstm, weights
+                
+        prob_bilstm, weights = await asyncio.to_thread(run_bilstm)
             
         # 2. BERT Prediction
-        inputs = resources["bert_tokenizer"](content, truncation=True, padding='max_length', max_length=200, return_tensors='pt')
-        tfidf_feat = resources["classical_extractor"].get_tfidf_features([content])
-        other_feat = resources["classical_extractor"].get_pos_features(content) + resources["classical_extractor"].get_sentiment_features(content)
-        combined_feat = np.hstack([tfidf_feat, [other_feat]])
-        classical_tensor = torch.tensor(combined_feat, dtype=torch.float32)
-        
-        with torch.no_grad():
-            prob_bert_raw = resources["bert_model"](input_ids=inputs['input_ids'], 
-                                       attention_mask=inputs['attention_mask'], 
-                                       classical_features=classical_tensor)
-            prob_bert = float(prob_bert_raw[0][0])
+        def run_bert():
+            inputs = resources["bert_tokenizer"](content, truncation=True, padding='max_length', max_length=512, return_tensors='pt')
+            tfidf_feat = resources["classical_extractor"].get_tfidf_features([content])
+            other_feat = resources["classical_extractor"].get_pos_features(content) + resources["classical_extractor"].get_sentiment_features(content)
+            combined_feat = np.hstack([tfidf_feat, [other_feat]])
+            classical_tensor = torch.tensor(combined_feat, dtype=torch.float32).to(resources["device"])
             
-        # 3. Heuristic Analysis (comprehensive)
-        heuristic_result = compute_heuristic_score(content)
+            with torch.no_grad():
+                prob_bert_raw = resources["bert_model"](
+                    input_ids=inputs['input_ids'].to(resources["device"]), 
+                    attention_mask=inputs['attention_mask'].to(resources["device"]), 
+                    classical_features=classical_tensor
+                )
+                return float(prob_bert_raw[0][0])
+                
+        prob_bert = await asyncio.to_thread(run_bert)
+            
+        # 3. Heuristic Analysis (live fact check)
+        heuristic_result = await live_fact_check(data.title, data.text)
         heuristic_prob = heuristic_result["score"]
-        trust_count = heuristic_result["details"]["trust_markers"]
-        sensational_count = heuristic_result["details"]["sensationalism"]
         
         # 4. Adaptive Ensemble — model trust based on calibration
         raw_model_prob = (prob_bert * 0.6) + (prob_bilstm * 0.4)
         _prediction_history.append(raw_model_prob)
+        while len(_prediction_history) > 200:
+            try:
+                _prediction_history.popleft()
+            except IndexError:
+                break
         
         model_trust = detect_model_calibration()
         
@@ -300,23 +289,38 @@ async def predict(data: NewsInput):
             
         final_prob = (raw_model_prob * model_trust) + (heuristic_prob * (1 - model_trust))
         
+        # 5. Domain confidence disclaimer
+        word_count = len(content.split())
+        disclaimers = []
+        if word_count < 30:
+            disclaimers.append("Very short input — prediction confidence may be reduced.")
+        # Detect likely non-English content (simple heuristic: high ratio of non-ASCII chars)
+        non_ascii_ratio = sum(1 for c in content if ord(c) > 127) / max(len(content), 1)
+        if non_ascii_ratio > 0.3:
+            disclaimers.append("Non-English content detected — model was trained on English text only.")
+        if heuristic_prob < 0.25 and raw_model_prob > 0.75:
+            disclaimers.append("Model and fact-checker disagree — content may be outside the trained domain (US political news).")
+        
         return {
             "bilstm_prob": prob_bilstm,
             "bert_prob": prob_bert,
             "final_prob": final_prob,
-            "tokens": clean_tokens[:200],
-            "attention_weights": [round(w, 4) for w in weights[:200]],
+            "tokens": clean_tokens[:512],
+            "attention_weights": [round(w, 4) for w in weights[:512]],
             "heuristics": heuristic_result["details"],
             "meta": {
                 "execution_time": time.time() - start_time,
                 "model_trust": model_trust,
                 "heuristic_score": heuristic_prob,
-                "version": "2.0.0-calibrated"
-            }
+                "version": "3.0.0",
+                "model_version": os.path.getmtime(settings.BERT_MODEL_PATH) if os.path.exists(settings.BERT_MODEL_PATH) else None,
+                "device": str(resources["device"]),
+            },
+            "disclaimers": disclaimers if disclaimers else None
         }
     except Exception as e:
         logger.error(f"Prediction error: {e}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Prediction failed due to an internal error.")
 
 # Health Check
 @app.get("/health")

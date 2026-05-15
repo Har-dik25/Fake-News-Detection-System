@@ -15,3 +15,4 @@ WELFake_Dataset.csv
 # Note: In a real production, you might COPY models from a volume or a specific bucket
 # but for this local project, we might want to include them in the image if they aren't too large.
 # If they are large, don't ignore them here if you want them in the image.
+cache/

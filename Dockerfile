@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
@@ -20,7 +20,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Download NLTK data
-RUN python -m nltk.downloader punkt averaged_perceptron_tagger vader_lexicon
+RUN python -m nltk.downloader punkt punkt_tab averaged_perceptron_tagger vader_lexicon stopwords wordnet
 
 # Copy project
 COPY . .
@@ -33,4 +33,4 @@ RUN touch app.log && chmod 666 app.log
 
 # Run the application using Gunicorn for production
 # We use uvicorn workers for ASGI support
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app:app", "--bind", "0.0.0.0:8000", "--timeout", "120"]
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app:app", "--bind", "0.0.0.0:8000", "--timeout", "120", "--forwarded-allow-ips", "*"]

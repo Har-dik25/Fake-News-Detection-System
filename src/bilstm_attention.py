@@ -15,7 +15,7 @@ class ScaledDotProductAttention(nn.Module):
         self.key = nn.Linear(hidden_dim, hidden_dim)
         self.value = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         # x shape: [batch_size, seq_len, hidden_dim]
         q = self.query(x)
         k = self.key(x)
@@ -24,6 +24,13 @@ class ScaledDotProductAttention(nn.Module):
         # Attention weights
         # [batch_size, seq_len, seq_len]
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
+        
+        if mask is not None:
+            # mask shape: [batch_size, seq_len]
+            # expand to [batch_size, seq_len, seq_len]
+            attn_mask = mask.unsqueeze(1).expand_as(attn_weights)
+            attn_weights = attn_weights.masked_fill(attn_mask == 0, -1e9)
+            
         attn_weights = F.softmax(attn_weights, dim=-1)
         
         # Output
@@ -53,17 +60,24 @@ class BiLSTMWithAttention(nn.Module):
 
     def forward(self, x):
         # x: [batch_size, seq_len]
+        # Create mask: 1 for real tokens, 0 for padding (0 is padding_idx)
+        mask = (x != 0).float().to(x.device)
+        
         embedded = self.embedding(x)
         lstm_out, _ = self.lstm(embedded)
         # lstm_out: [batch_size, seq_len, hidden_dim * 2]
         
         if self.use_attention:
-            attn_out, attn_weights = self.attn(lstm_out)
-            # Pool across sequence dimension (mean pooling)
-            pooled = torch.mean(attn_out, dim=1)
+            attn_out, attn_weights = self.attn(lstm_out, mask)
+            # Pool across sequence dimension (mean pooling over valid tokens only)
+            sum_pooled = torch.sum(attn_out * mask.unsqueeze(-1), dim=1)
+            lengths = mask.sum(dim=1, keepdim=True).clamp(min=1)
+            pooled = sum_pooled / lengths
         else:
-            # Standard BiLSTM pooling (e.g., mean)
-            pooled = torch.mean(lstm_out, dim=1)
+            # Standard BiLSTM pooling over valid tokens only
+            sum_pooled = torch.sum(lstm_out * mask.unsqueeze(-1), dim=1)
+            lengths = mask.sum(dim=1, keepdim=True).clamp(min=1)
+            pooled = sum_pooled / lengths
             attn_weights = None
             
         out = self.dropout(pooled)

@@ -1,0 +1,15 @@
+{
+    "reputable_domains": [
+        "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk", "npr.org",
+        "nytimes.com", "wsj.com", "bloomberg.com", "theguardian.com",
+        "washingtonpost.com", "economist.com", "aljazeera.com",
+        "dw.com", "france24.com", "abc.net.au", "cbc.ca",
+        "thehindu.com", "ndtv.com", "nhk.or.jp", "scmp.com",
+        "nature.com", "sciencedirect.com", "who.int", "un.org"
+    ],
+    "unreliable_domains": [
+        "breitbart.com", "infowars.com", "thegatewaypundit.com",
+        "naturalnews.com", "beforeitsnews.com", "worldnewsdailyreport.com",
+        "yournewswire.com", "neonnettle.com"
+    ]
+}
